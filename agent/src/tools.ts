@@ -1,118 +1,58 @@
 /**
- * Tool definitions for the AI chat agent
- * Tools can either require human confirmation or execute automatically
+ * Simplified tools for drone control
+ * All tools call DroneAgent RPC methods directly
  */
 import { tool } from "ai";
 import { z } from "zod";
-
-import type { Chat } from "./server";
-import { getCurrentAgent } from "agents";
-import { unstable_scheduleSchema } from "agents/schedule";
+import { getAgentByName } from "agents";
 import { env } from "cloudflare:workers";
-import { generateText } from "ai";
-import { createWorkersAI } from "workers-ai-provider";
-import { openai } from "@ai-sdk/openai";
-import { PROMPT, TELLO_COMMANDS_STRING } from "./telloCommands";
+import type { DroneAgent } from "./server";
 
-// TODO:
-// [] Update to gpt5 and new agnets and ai sdks
-// [] Feed compass data to model
-// [] Add model response to moves
-// [] Only request new detection after inference
+// Get DroneAgent stub for RPC calls
+const getDroneAgent = () => getAgentByName(env.DroneAgent, "default") as unknown as DroneAgent;
 
-const model = openai("gpt-4o-2024-11-20");
-const moveDroneToTarget = tool({
-  description: "Get the drone to fly towards a target and land",
+/** Send a Tello command directly to the drone */
+const sendCommand = tool({
+  description: "Send a Tello SDK command to the drone (e.g., 'takeoff', 'land', 'forward 100', 'battery?')",
   parameters: z.object({
-    target: z.string().describe("The target to fly to")
+    command: z.string().describe("The exact Tello command to send")
   }),
-  execute: async ({ target }) => {
-    try {
-      let { webSocket: droneWs } = await fetch("http://localhost:8788/ws", {
-        headers: { Upgrade: "websocket" }
-      });
-      if (!droneWs) throw new Error("server didn't accept WebSocket");
-
-      droneWs.accept();
-      function droneSend(payload: object) {
-        droneWs?.send(JSON.stringify(payload));
-      }
-      droneSend({ type: "target:start", payload: target });
-
-      const moves: any[] = [];
-
-      return await new Promise((resolve, reject) => {
-        droneWs.addEventListener("message", async (event: any) => {
-          try {
-            const msg = JSON.parse(event.data);
-
-            if (msg.type === "info") {
-              console.log(msg);
-            } else if (msg.type === "target") {
-              const detection = msg.payload;
-
-              const prompt = `
-            ${PROMPT}
-            TELLO DRONE COMMANDS:
-            ${TELLO_COMMANDS_STRING}
-            PREVIOUS DRONE DETECTIONS AND MOVES MADE BY YOU:
-            ${JSON.stringify(moves)}
-            NEW FRAME INFO AND DETECTED OBJECT:
-            ${JSON.stringify(detection)}
-            `;
-
-              const { text } = await generateText({ model, prompt });
-              const llm_command = text.replaceAll('"', "");
-              const move = {
-                move_number: moves.length + 1,
-                llm_generated_command: llm_command,
-                ...detection
-              };
-
-              console.log(move);
-              moves.push(move);
-
-              droneSend({ type: "command", payload: llm_command });
-
-              if (llm_command === "land") {
-                droneWs.close();
-                resolve(
-                  `landed drone at ${target} after ${moves.length} moves`
-                );
-              }
-            }
-          } catch (err) {
-            reject(err);
-          }
-        });
-
-        droneWs.addEventListener("close", () => {
-          resolve("connection closed");
-        });
-
-        droneWs.addEventListener("error", (err: any) => {
-          reject(err);
-        });
-      });
-    } catch (error: any) {
-      console.error(error);
-      throw new Error(error.message);
-    }
+  execute: async ({ command }) => {
+    const agent = await getDroneAgent();
+    return agent.sendCommand(command);
   }
 });
 
-/**
- * Export all available tools
- * These will be provided to the AI model to describe available capabilities
- */
-export const tools = {
-  moveDroneToTarget
-};
+/** Start autonomous mission */
+const startMission = tool({
+  description: "Start autonomous mission - drone uses vision to fly to target and land on it",
+  parameters: z.object({
+    target: z.string().describe("Target object to fly to (e.g., 'red cup', 'person', 'chair')")
+  }),
+  execute: async ({ target }) => {
+    const agent = await getDroneAgent();
+    return agent.startMission(target);
+  }
+});
 
-/**
- * Implementation of confirmation-required tools
- * This object contains the actual logic for tools that need human approval
- * Each function here corresponds to a tool above that doesn't have an execute function
- * NOTE: keys below should match toolsRequiringConfirmation in app.tsx
- */
-export const executions = {};
+/** Stop autonomous mission */
+const stopMission = tool({
+  description: "Stop the current autonomous mission",
+  parameters: z.object({}),
+  execute: async () => {
+    const agent = await getDroneAgent();
+    return agent.stopMission();
+  }
+});
+
+/** Get connection status */
+const getStatus = tool({
+  description: "Check if the drone controller is connected and get current mission status",
+  parameters: z.object({}),
+  execute: async () => {
+    const agent = await getDroneAgent();
+    return agent.getStatus();
+  }
+});
+
+export const tools = { sendCommand, startMission, stopMission, getStatus };

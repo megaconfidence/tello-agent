@@ -2,7 +2,6 @@ import { useEffect, useState, useRef, useCallback, use } from "react";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "agents/ai-react";
 import type { Message } from "@ai-sdk/react";
-import type { tools } from "./tools";
 
 // Component imports
 import { Button } from "@/components/button/Button";
@@ -24,11 +23,8 @@ import {
   Stop
 } from "@phosphor-icons/react";
 
-// List of tools that require human confirmation
-// NOTE: this should match the keys in the executions object in tools.ts
-const toolsRequiringConfirmation: (keyof typeof tools)[] = [
-  "getWeatherInformation"
-];
+// No tools require human confirmation
+const toolsRequiringConfirmation: string[] = [];
 
 export default function Chat() {
   const [theme, setTheme] = useState<"dark" | "light">(() => {
@@ -96,9 +92,7 @@ export default function Chat() {
       (part) =>
         part.type === "tool-invocation" &&
         part.toolInvocation.state === "call" &&
-        toolsRequiringConfirmation.includes(
-          part.toolInvocation.toolName as keyof typeof tools
-        )
+        toolsRequiringConfirmation.includes(part.toolInvocation.toolName)
     )
   );
 
@@ -269,7 +263,7 @@ export default function Chat() {
                             const toolCallId = toolInvocation.toolCallId;
                             const needsConfirmation =
                               toolsRequiringConfirmation.includes(
-                                toolInvocation.toolName as keyof typeof tools
+                                toolInvocation.toolName
                               );
 
                             // Skip rendering the card in debug mode

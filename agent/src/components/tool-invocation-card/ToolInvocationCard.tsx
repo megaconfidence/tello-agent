@@ -3,7 +3,8 @@ import { Robot, CaretDown } from "@phosphor-icons/react";
 import { Button } from "@/components/button/Button";
 import { Card } from "@/components/card/Card";
 import { Tooltip } from "@/components/tooltip/Tooltip";
-import { APPROVAL } from "@/shared";
+
+const APPROVAL = { YES: "Yes, confirmed.", NO: "No, denied." } as const;
 
 interface ToolInvocation {
   toolName: string;

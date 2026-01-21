@@ -7,16 +7,15 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@hono/node-server": "^1.19.0",
-    "@hono/node-ws": "^1.2.0",
     "dotenv": "^17.2.3",
     "ffmpeg-static": "^5.2.0",
-    "hono": "^4.9.4",
     "moondream": "^0.1.1",
-    "terminal-image": "^4.1.0"
+    "terminal-image": "^4.1.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.17",
+    "@types/ws": "^8.5.10",
     "tsx": "^4.7.1",
     "typescript": "^5.8.3"
   }

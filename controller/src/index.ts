@@ -1,133 +1,145 @@
-import fs from "fs";
 import dgram from "dgram";
-import { Hono } from "hono";
 import dotenv from "dotenv";
 import { vl } from "moondream";
-import { serve } from "@hono/node-server";
-import terminalImage from "terminal-image";
-import { createNodeWebSocket } from "@hono/node-ws";
+import { WebSocket } from "ws";
 import { takeSnapshot, calculateObjectCoverage } from "./utils.js";
 
 dotenv.config();
 
-let target: string;
-let wsClient: WebSocket;
+const FRAME_WIDTH = 960;
+const FRAME_HEIGHT = 720;
 
-const frame_width = 960;
-const frame_height = 720;
+const telloIp = process.env.TELLO_IP!;
+const telloPort = Number(process.env.TELLO_PORT);
+const videoPort = Number(process.env.VIDEO_PORT);
+const agentUrl = process.env.AGENT_WS_URL || "ws://localhost:5173/agents/drone-agent/default";
 
-const tello_ip = process.env.TELLO_IP!;
-const tello_port = Number(process.env.TELLO_PORT);
-const video_port = Number(process.env.VIDEO_PORT);
+const udpSocket = dgram.createSocket("udp4");
+const visionModel = new vl({ apiKey: process.env.MOONDREAM_KEY });
 
-const commandSocket = dgram.createSocket("udp4");
-const model = new vl({ apiKey: process.env.MOONDREAM_KEY });
+let agentWs: WebSocket | null = null;
+let missionController: AbortController | null = null;
+let currentTarget = "";
 
-function sendCommand(cmd: string) {
-  console.log(">>", cmd);
-  commandSocket.send(Buffer.from(cmd), 0, cmd.length, tello_port, tello_ip);
+/** Send command to drone via UDP */
+function sendToDrone(cmd: string) {
+  console.log(">> Drone:", cmd);
+  udpSocket.send(Buffer.from(cmd), 0, cmd.length, telloPort, telloIp);
 }
 
-function sendWs(msg: object) {
-  wsClient.send(JSON.stringify(msg));
-}
-
-commandSocket.on("message", (msg) => {
-  const msgStr = msg.toString().trim();
-  console.log("<<", msgStr);
-  if (wsClient) sendWs({ type: "info", payload: msgStr });
-});
-
-function droneSetUp() {
-  sendCommand("command"); // enable SDK mode
-  sendCommand("battery?");
-  setTimeout(() => sendCommand("streamon"), 1000); // enable video
-}
-
-commandSocket.bind(tello_port, droneSetUp);
-
-const controller = new AbortController();
-
-async function runLoop(signal: AbortSignal) {
-  while (!signal.aborted) {
-    try {
-      const image = await takeSnapshot(tello_ip, video_port);
-
-      console.log(await terminalImage.buffer(image, { width: "50%" }));
-      fs.writeFileSync("image.png", image);
-
-      const detect = await model.detect({ image, object: target });
-
-      const detectPx = detect.objects.map((i) => ({
-        x_min: Math.round(i.x_min * frame_width),
-        y_min: Math.round(i.y_min * frame_height),
-        x_max: Math.round(i.x_max * frame_width),
-        y_max: Math.round(i.y_max * frame_height),
-      }));
-      const detection = {
-        frame_width,
-        frame_height,
-        detected_object: target,
-        object_coordinate: detectPx[0], // only care about first item
-      };
-      detection.object_coverage_percentage = calculateObjectCoverage(detection);
-      sendWs({ type: "target", payload: detection });
-      console.log(detection);
-    } catch (err) {
-      if (!controller.signal.aborted) controller.abort();
-      console.error("Error:", err);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 3000));
+/** Send message to agent */
+function sendToAgent(msg: object) {
+  if (agentWs?.readyState === WebSocket.OPEN) {
+    agentWs.send(JSON.stringify(msg));
   }
 }
 
-const app = new Hono();
-const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
+/** Handle drone responses */
+udpSocket.on("message", (msg) => {
+  const response = msg.toString().trim();
+  console.log("<< Drone:", response);
+  sendToAgent({ type: "response", payload: response });
+});
 
-app.get("/", (c) => c.text("Hello Hono!"));
+/** Run autonomous mission detection loop */
+async function runMission(signal: AbortSignal) {
+  console.log(`\nMission started: ${currentTarget}`);
 
-app.get(
-  "/ws",
-  upgradeWebSocket((c) => {
-    return {
-      onMessage(event, ws: WebSocket) {
-        wsClient = ws;
-        const { type, payload } = JSON.parse(event.data);
-        console.log({ type, payload });
-        switch (type) {
-          case "command":
-            sendCommand(payload);
-            break;
-          case "target:start":
-            target = payload;
-            runLoop(controller.signal);
-            break;
-          case "target:stop":
-            controller.abort();
-            break;
-          default:
-            break;
-        }
-      },
-      onOpen: () => {
-        console.log("New connection");
-        droneSetUp();
-      },
-      onClose: () => {
-        console.log("Connection closed");
-        if (!controller.signal.aborted) controller.abort();
-      },
-    };
-  }),
-);
+  while (!signal.aborted) {
+    try {
+      const image = await takeSnapshot(telloIp, videoPort);
+      const detect = await visionModel.detect({ image, object: currentTarget });
+      const coords = detect.objects[0];
 
-const server = serve(
-  {
-    fetch: app.fetch,
-    port: 8788,
-  },
-  (info) => {
-    console.log(`Server is running on http://localhost:${info.port}`);
-  },
-);
-injectWebSocket(server);
+      const detection = {
+        frame_width: FRAME_WIDTH,
+        frame_height: FRAME_HEIGHT,
+        object_coordinate: coords ? {
+          x_min: Math.round(coords.x_min * FRAME_WIDTH),
+          y_min: Math.round(coords.y_min * FRAME_HEIGHT),
+          x_max: Math.round(coords.x_max * FRAME_WIDTH),
+          y_max: Math.round(coords.y_max * FRAME_HEIGHT),
+        } : null,
+        object_coverage_percentage: 0,
+      };
+      detection.object_coverage_percentage = calculateObjectCoverage(detection);
+
+      console.log("Detection:", detection);
+      sendToAgent({ type: "detection", payload: detection });
+    } catch (err) {
+      console.error("Detection error:", err);
+    }
+
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  console.log("Mission stopped");
+}
+
+/** Connect to DroneAgent WebSocket */
+function connectToAgent() {
+  console.log(`Connecting to: ${agentUrl}`);
+  agentWs = new WebSocket(agentUrl);
+
+  agentWs.on("open", () => {
+    console.log("Connected to Agent");
+    sendToDrone("command");
+    sendToDrone("battery?");
+    setTimeout(() => sendToDrone("streamon"), 1000);
+  });
+
+  agentWs.on("message", (data: Buffer) => {
+    try {
+      const msg = JSON.parse(data.toString());
+
+      switch (msg.type) {
+        case "start-mission":
+          currentTarget = msg.payload;
+          missionController?.abort();
+          missionController = new AbortController();
+          runMission(missionController.signal);
+          break;
+
+        case "stop-mission":
+        case "complete":
+          missionController?.abort();
+          missionController = null;
+          currentTarget = "";
+          if (msg.type === "complete") console.log("\n>>> Mission complete");
+          break;
+
+        case "command":
+          sendToDrone(msg.payload);
+          break;
+
+        case "cf_agent_state":
+          break; // Ignore SDK internal message
+      }
+    } catch (err) {
+      console.error("Parse error:", err);
+    }
+  });
+
+  agentWs.on("close", () => {
+    console.log("Disconnected - reconnecting in 5s...");
+    agentWs = null;
+    setTimeout(connectToAgent, 5000);
+  });
+
+  agentWs.on("error", (err) => console.error("WebSocket error:", err));
+}
+
+// Start
+udpSocket.bind(telloPort, () => {
+  console.log(`UDP on port ${telloPort}`);
+  connectToAgent();
+});
+
+process.on("SIGINT", () => {
+  console.log("\nShutting down...");
+  missionController?.abort();
+  agentWs?.close();
+  udpSocket.close();
+  process.exit(0);
+});
+
+console.log("\nController ready. Use Chat agent to control drone.\n");

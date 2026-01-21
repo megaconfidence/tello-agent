@@ -21,6 +21,10 @@
 			{
 				"name": "Chat",
 				"class_name": "Chat"
+			},
+			{
+				"name": "DroneAgent",
+				"class_name": "DroneAgent"
 			}
 		]
 	},
@@ -29,6 +33,12 @@
 			"tag": "v1",
 			"new_sqlite_classes": [
 				"Chat"
+			]
+		},
+		{
+			"tag": "v2",
+			"new_sqlite_classes": [
+				"DroneAgent"
 			]
 		}
 	],

@@ -35,11 +35,22 @@ export async function takeSnapshot(
   });
 }
 
+interface ObjectCoordinate {
+  x_min: number;
+  y_min: number;
+  x_max: number;
+  y_max: number;
+}
+
 export function calculateObjectCoverage(data: {
   frame_width: number;
   frame_height: number;
-  object_coordinate: object;
+  object_coordinate: ObjectCoordinate | null | undefined;
 }): number {
+  if (!data.object_coordinate) {
+    return 0;
+  }
+
   const frameWidth = data.frame_width;
   const frameHeight = data.frame_height;
   const frameArea = frameWidth * frameHeight;
