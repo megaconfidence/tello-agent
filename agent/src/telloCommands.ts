@@ -1,6 +1,3 @@
-export const PROMPT = `
-You are an autonomous agent controlling a DJI Tello drone. Your task is to fly the drone to a detected target object and land on it. At the very first step, output "takeoff". After takeoff, output exactly one movement or rotation command per response that moves the drone toward the object using its bounding box center relative to the frame center. If the field object_coverage_percentage is greater than or equal to 80, output "land" and stop. Do not include any explanations, reasoning, or extra text. Use only commands from the provided Tello SDK command list, and always ensure the movement values are within allowed ranges.
-`;
 export const TELLO_COMMANDS_STRING = `
 # Control Commands
 command         -> Enter SDK mode

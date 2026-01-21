@@ -5,22 +5,22 @@ import {
   type ConnectionContext
 } from "agents";
 import { AIChatAgent } from "agents/ai-chat-agent";
-import { createDataStreamResponse, generateText, streamText } from "ai";
+import { createDataStreamResponse, streamText } from "ai";
 import { openai } from "@ai-sdk/openai";
 import { tools } from "./tools";
-import { PROMPT, TELLO_COMMANDS_STRING } from "./telloCommands";
+import { TELLO_COMMANDS_STRING } from "./telloCommands";
 
 const model = openai("gpt-4o-mini");
 
-// System prompt for the Chat agent - includes Tello commands so it can generate them directly
+// System prompt for the Chat agent
 const CHAT_SYSTEM_PROMPT = [
   "You are a drone control assistant. You can control a Tello drone using these tools:",
   "",
   "TOOLS:",
   "- sendCommand: Send a Tello command to the drone (see command list below)",
-  "- startMission: Start autonomous vision-based mission to fly to a target object",
+  "- startMission: Start autonomous vision-based mission with PID navigation to fly to a target",
   "- stopMission: Stop the current autonomous mission",
-  "- getStatus: Check if controller is connected",
+  "- getStatus: Check controller connection and drone state",
   "",
   "TELLO COMMANDS (use with sendCommand):",
   TELLO_COMMANDS_STRING,
@@ -29,15 +29,25 @@ const CHAT_SYSTEM_PROMPT = [
   "- The controller must be running for commands to work",
   "- Use exact Tello command syntax (e.g., 'forward 100' not 'move forward 1 meter')",
   "- For battery, use 'battery?' - for takeoff use 'takeoff' - for landing use 'land'",
-  "- Distance values are in centimeters (20-500 range typically)"
+  "- Distance values are in centimeters (20-500 range typically)",
+  "- Autonomous missions use PID control for smooth, accurate navigation"
 ].join("\n");
 
+/** Mission status tracking */
+interface MissionStatus {
+  target: string;
+  moveCount: number;
+  lastDetection?: unknown;
+  droneState?: unknown;
+}
+
 /**
- * Drone Agent - WebSocket server for controller, handles autonomous missions
+ * Drone Agent - WebSocket server for controller
+ * Movement generation now handled by controller's PID controller
  */
 export class DroneAgent extends Agent<Env> {
-  private currentTarget = "";
   private lastResponse = "";
+  private missionStatus: MissionStatus | null = null;
 
   /** Broadcast to all connected controllers */
   private sendToControllers(message: object): number {
@@ -64,35 +74,47 @@ export class DroneAgent extends Agent<Env> {
     this.lastResponse = "";
     this.sendToControllers({ type: "command", payload: command });
     
-    // Wait briefly for response (simple polling)
+    // Wait for response
     for (let i = 0; i < 20 && !this.lastResponse; i++) {
       await new Promise(r => setTimeout(r, 500));
     }
     return this.lastResponse || `Sent: ${command}`;
   }
 
-  /** RPC: Start autonomous mission */
+  /** RPC: Start autonomous mission with PID navigation */
   async startMission(target: string): Promise<string> {
     if (this.ctx.getWebSockets().length === 0) {
       return "Error: No controller connected";
     }
-    this.currentTarget = target;
+    this.missionStatus = { target, moveCount: 0 };
     this.sendToControllers({ type: "start-mission", payload: target });
-    return `Mission started: ${target}`;
+    return `Mission started: "${target}" (using PID navigation)`;
   }
 
   /** RPC: Stop mission */
   async stopMission(): Promise<string> {
-    this.currentTarget = "";
+    this.missionStatus = null;
     this.sendToControllers({ type: "stop-mission" });
     return "Mission stopped";
   }
 
-  /** RPC: Get status */
+  /** RPC: Get status including drone telemetry */
   async getStatus(): Promise<string> {
     const count = this.ctx.getWebSockets().length;
     if (count === 0) return "No controller connected";
-    return this.currentTarget ? `Connected. Mission: ${this.currentTarget}` : "Connected. Idle.";
+    
+    let status = "Connected.";
+    if (this.missionStatus) {
+      status += ` Mission: "${this.missionStatus.target}" (${this.missionStatus.moveCount} moves)`;
+      if (this.missionStatus.droneState) {
+        const state = this.missionStatus.droneState as any;
+        if (state.h !== undefined) status += ` | Height: ${state.h}cm`;
+        if (state.bat !== undefined) status += ` | Battery: ${state.bat}%`;
+      }
+    } else {
+      status += " Idle.";
+    }
+    return status;
   }
 
   /** WebSocket: Controller connected */
@@ -101,7 +123,7 @@ export class DroneAgent extends Agent<Env> {
   }
 
   /** WebSocket: Message from controller */
-  async onMessage(connection: Connection, message: string | ArrayBuffer) {
+  async onMessage(_connection: Connection, message: string | ArrayBuffer) {
     const msg = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message));
 
     switch (msg.type) {
@@ -109,31 +131,21 @@ export class DroneAgent extends Agent<Env> {
         this.lastResponse = msg.payload;
         break;
 
-      case "detection": {
-        if (!this.currentTarget) return;
-        const command = await this.generateMove(msg.payload);
-        connection.send(JSON.stringify({ type: "command", payload: command }));
-        if (command === "land") {
-          this.currentTarget = "";
-          connection.send(JSON.stringify({ type: "complete" }));
+      case "detection":
+        // Controller now generates commands locally via PID
+        // Just update mission status for tracking
+        if (this.missionStatus && msg.payload) {
+          this.missionStatus.moveCount = msg.payload.moveCount || this.missionStatus.moveCount + 1;
+          this.missionStatus.lastDetection = msg.payload;
+          this.missionStatus.droneState = msg.payload.droneState;
         }
         break;
-      }
+
+      case "complete":
+        console.log(`Mission complete: ${msg.payload?.moves || "?"} moves`);
+        this.missionStatus = null;
+        break;
     }
-  }
-
-  /** Generate movement command for autonomous mission */
-  private async generateMove(detection: unknown): Promise<string> {
-    const prompt = [
-      PROMPT,
-      "TELLO COMMANDS:",
-      TELLO_COMMANDS_STRING,
-      `TARGET: ${this.currentTarget}`,
-      `DETECTION: ${JSON.stringify(detection)}`
-    ].join("\n");
-
-    const { text } = await generateText({ model, prompt });
-    return text.replaceAll('"', "").trim();
   }
 
   onClose(connection: Connection) {
